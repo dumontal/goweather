@@ -1,5 +1,12 @@
 package main
 
+import "net/http"
+
 func main() {
-	println("Hello, I'm a new program written in Go!")
+	http.HandleFunc("/", sayHello)
+	http.ListenAndServe(":8080", nil)
+}
+
+func sayHello(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello, I'm a Go server!"))
 }
