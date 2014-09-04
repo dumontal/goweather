@@ -11,6 +11,7 @@ import (
 func main() {
 	mw := multiWeatherProvider{
 		openWeatherMap{},
+		// TODO: add other providers here.
 	}
 
 	http.HandleFunc("/weather/", func(w http.ResponseWriter, r *http.Request) {
