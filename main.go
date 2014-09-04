@@ -1,53 +1,101 @@
 package main
 
 import (
-    "encoding/json"
-    "net/http"
-    "strings"
+	"encoding/json"
+	"log"
+	"net/http"
+	"strings"
+	"time"
 )
 
 func main() {
-    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        w.Write([]byte("Hello! I am a weather server.\n"))
-    })
+	mw := multiWeatherProvider{
+		openWeatherMap{},
+	}
 
-    http.HandleFunc("/weather/", func(w http.ResponseWriter, r *http.Request) {
-        city := strings.SplitN(r.URL.Path, "/", 3)[2]
+	http.HandleFunc("/weather/", func(w http.ResponseWriter, r *http.Request) {
+		begin := time.Now()
+		city := strings.SplitN(r.URL.Path, "/", 3)[2]
 
-        data, err := query(city)
-        if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
+		temp, err := mw.temperature(city)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-        w.Header().Set("Content-Type", "application/json; charset=utf-8")
-        json.NewEncoder(w).Encode(data)
-    })
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"city": city,
+			"temp": temp,
+			"took": time.Since(begin).String(),
+		})
+	})
 
-    http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":8080", nil)
 }
 
-func query(city string) (WeatherData, error) {
-    resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?q=" + city)
-    if err != nil {
-        return WeatherData{}, err
-    }
-
-    defer resp.Body.Close()
-
-    var data WeatherData
-    err = json.NewDecoder(resp.Body).Decode(&data)
-
-    if err != nil {
-        return WeatherData{}, err
-    }
-
-    return data, nil
+type weatherProvider interface {
+	// Returns the temperature in Celsius corresponding to the provided location.
+	temperature(city string) (float64, error)
 }
 
-type WeatherData struct {
-    Name string `json:"name"`
-    Main struct {
-        Kelvin float64 `json:"temp"`
-    } `json:"main"`
+type multiWeatherProvider []weatherProvider
+
+func (w multiWeatherProvider) temperature(city string) (float64, error) {
+	// Make a channel for temperatures, and a channel for errors.
+	// Each provider will push a value into only one.
+	temps := make(chan float64, len(w))
+	errs := make(chan error, len(w))
+
+	// For each provider, spawn a goroutine with an anonymous function.
+	// That function will invoke the temperature method, and forward the response.
+	for _, provider := range w {
+		go func(p weatherProvider) {
+			k, err := p.temperature(city)
+			if err != nil {
+				errs <- err
+				return
+			}
+			temps <- k
+		}(provider)
+	}
+
+	sum := 0.0
+
+	// Collect a temperature or an error from each provider.
+	for i := 0; i < len(w); i++ {
+		select {
+		case temp := <-temps:
+			sum += temp
+		case err := <-errs:
+			return 0, err
+		}
+	}
+
+	// Return the average, same as before.
+	return sum / float64(len(w)), nil
+}
+
+type openWeatherMap struct{}
+
+func (w openWeatherMap) temperature(city string) (float64, error) {
+	resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?q=" + city)
+	if err != nil {
+		return 0, err
+	}
+
+	defer resp.Body.Close()
+
+	var d struct {
+		Main struct {
+			Kelvin float64 `json:"temp"`
+		} `json:"main"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return 0, err
+	}
+
+	log.Printf("openWeatherMap: %s: %.2f", city, d.Main.Kelvin)
+	return d.Main.Kelvin - 273.15, nil
 }
